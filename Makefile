@@ -1,6 +1,6 @@
 export SHELLOPTS:=errexit:pipefail
 SHELL=/bin/bash  # required to make pipefail work
-.SECONDARY:      # do not delete any intermediate files
+.SECONDARY:      # do not delete intermediate files
 .SECONDEXPANSION: # allow functions in dependency list
 LOG = perl -ne 'use POSIX qw(strftime); $$|=1; print strftime("%F %02H:%02M:%S ", localtime), $$ARGV[0], "$@: $$_";'
 
@@ -19,17 +19,15 @@ BWA=flock -x .lock /data_synology/software/bwa-0.7.12/bwa
 SAMTOOLS=/data_synology/software/samtools-0.1.19/samtools
 PICARD=$(DOCKER) biowaste:5000/ccri/picard-2.2.2 java -XX:+UseParallelGC -XX:ParallelGCThreads=8 -Xmx2g -Djava.io.tmpdir=`pwd`/tmp -jar /usr/picard/picard.jar
 GATK=java -XX:+UseParallelGC -XX:ParallelGCThreads=8 -Xmx4g -jar /data_synology/software/GenomeAnalysisTK-3.3.0/GenomeAnalysisTK.jar
-VARSCAN=java -jar /data_synology/software/varscan-2.3.6/VarScan.v2.3.6.jar
-SNPEFF=java -XX:+UseParallelGC -XX:ParallelGCThreads=8 -Xmx4g -jar /data_synology/software/snpeff-4.2/snpEff.jar
+VARSCAN=java -jar /data_synology/software/varscan-2.4.2/VarScan.v2.4.2.jar
+SNPEFF=java -Xmx4g -jar /data_synology/software/snpeff-4.2/snpEff.jar -v GRCm38.82
+SNPSIFT=java -Xmx4g -jar /data_synology/software/snpeff-4.2/SnpSift.jar
+DBSNP=/data_synology/max/zohre/snps/ftp.ncbi.nih.gov/snp/organisms/mouse_10090/VCF/mouse.dbSnp146.vcf.gz
+VCFCONCAT=/data_synology/software/vcftools_0.1.10/bin/vcf-concat
+VCFSORT=/data_synology/software/vcftools_0.1.10/bin/vcf-sort
 
-#TUMOR_0=11291 11682 11689 11232 11221Up    
-#TUMOR_1=11746 9193
-#TUMOR_2=11746 9193
-#SAMPLES=$(foreach S, $(TUMOR_0), $(S)T $(S)K) \
-#        $(foreach S, $(TUMOR_1), $(S)_1T $(S)K) \
-#        $(foreach S, $(TUMOR_2), $(S)_2T $(S)K)
-
-SAMPLES=test 11291 11682 11689 11232 11221Up 11746_1 9193_1 11746_2 9193_2
+PAIRS=test 11291 11682 11689 11232 11221Up 11746_1 9193_1 11746_2 9193_2
+SAMPLES=$(addsuffix T,$(PAIRS)) $(addsuffix K,$(subst Up,,$(subst _2,,$(subst _1,,$(PAIRS))))) 
 
 all: bwa picard gatk varscan snpeff filtered-variants
 
@@ -43,7 +41,7 @@ clean:
 #-----------
 
 .PHONY: bwa
-bwa: $(foreach S, $(SAMPLES), bwa/$(S)T.bwa.sorted.dupmarked.bam.bai bwa/$$(subst Up,,$$(subst _2,,$$(subst _1,,$S)))K.bwa.sorted.dupmarked.bam.bai)
+bwa: $(foreach S, $(SAMPLES), bwa/$S.bwa.sorted.dupmarked.bam.bai)
 	 
 bwa/%.bwa.bam: $(REFGENOME) $(FASTQ)/%_R1.txt.gz $(FASTQ)/%_R2.txt.gz
 	mkdir -p bwa
@@ -81,7 +79,7 @@ bwa/%.bwa.sorted.dupmarked.bam.bai: bwa/%.bwa.sorted.dupmarked.bam
 #-----------
 
 .PHONY: gatk
-gatk: $(foreach S, $(SAMPLES), gatk/$(S)T.bwa.sorted.dupmarked.realigned.bam gatk/$$(subst Up,,$$(subst _2,,$$(subst _1,,$S)))K.bwa.sorted.dupmarked.realigned.bam)
+gatk: $(foreach S, $(SAMPLES), gatk/$S.bwa.sorted.dupmarked.realigned.bam)
 
 gatk/%.intervalList.intervals: bwa/%.bwa.sorted.dupmarked.bam bwa/%.bwa.sorted.dupmarked.bam.bai
 	mkdir -p gatk
@@ -114,8 +112,11 @@ gatk/%.bwa.sorted.dupmarked.realigned.bam.bai: gatk/%.bwa.sorted.dupmarked.reali
 #-----------	
 
 .PHONY: picard
-picard: $(foreach S, $(SAMPLES), picard/$(S)T.multiplemetrics   picard/$$(subst Up,,$$(subst _2,,$$(subst _1,,$S)))K.multiplemetrics \
-                                 picard/$(S)T.hs_metrics        picard/$$(subst Up,,$$(subst _2,,$$(subst _1,,$S)))K.hs_metrics)
+picard: picard/combined.picard.insert_size_metrics.tsv \
+	    picard/combined.picard.alignment_summary_metrics.tsv \
+	    picard/combined.picard.insert_size_histogram.pdf \
+	    picard/combined.picard.base_distribution_by_cycle.pdf \
+	    picard/combined.picard.hs_metrics.tsv
 
 picard/%.multiplemetrics: bwa/%.bwa.sorted.dupmarked.bam bwa/%.bwa.sorted.dupmarked.bam.bai
 	mkdir -p picard && rm -f $@
@@ -147,22 +148,45 @@ picard/%.hs_metrics: bwa/%.bwa.sorted.dupmarked.bam bwa/%.bwa.sorted.dupmarked.b
 	rm picard/$*.bed
 	mv $@.part $@
 
+picard/combined.picard.insert_size_metrics.tsv: $(foreach S, $(SAMPLES), picard/$S.multiplemetrics)
+	awk 'NR==7 { print "SAMPLE\t" $$_}' $(subst .multiplemetrics,.insert_size_metrics,$<) > $@.part
+	for FILE in $(subst .multiplemetrics,.insert_size_metrics,$^) ; do awk 'NR==8 { print FILENAME "\t" $$_}' "$$FILE" >> $@.part ; done
+	mv $@.part $@
+
+picard/combined.picard.alignment_summary_metrics.tsv: $(foreach S, $(SAMPLES), picard/$S.multiplemetrics)
+	awk 'NR==7 { print "SAMPLE\t" $$_}' $(subst .multiplemetrics,.alignment_summary_metrics,$<) > $@.part
+	for FILE in $(subst .multiplemetrics,.alignment_summary_metrics,$^) ; do awk 'NR==8||NR==9 {print FILENAME "\t" $$_}' "$$FILE" >> $@.part ; done
+	mv $@.part $@
+
+picard/combined.picard.insert_size_histogram.pdf: $(foreach S, $(SAMPLES), picard/$S.multiplemetrics)
+	gs -dBATCH -dNOPAUSE -q -sDEVICE=pdfwrite -sOutputFile=$@.part $(subst .multiplemetrics,.insert_size_histogram.pdf,$^)
+	mv $@.part $@
+
+picard/combined.picard.base_distribution_by_cycle.pdf: $(foreach S, $(SAMPLES), picard/$S.multiplemetrics)
+	gs -dBATCH -dNOPAUSE -q -sDEVICE=pdfwrite -sOutputFile=$@.part $(subst .multiplemetrics,.base_distribution_by_cycle.pdf,$^)
+	mv $@.part $@
+
+picard/combined.picard.hs_metrics.tsv: $(foreach S, $(SAMPLES), picard/$S.hs_metrics)
+	awk 'NR==7' $< > $@.part
+	for FILE in $^ ; do echo $$FILE && awk 'NR==8' "$$FILE" >> $@.part ; done
+	mv $@.part $@
+	
 #-----------	
 # VARSCAN
 #-----------	
 
 .PHONY: varscan
-varscan: $(foreach S, $(SAMPLES), varscan/$S.varscan.vcf)
+varscan: $(foreach P, $(PAIRS), varscan/$P.varscan.vcf)
 
 varscan/%.varscan.vcf: gatk/%T.bwa.sorted.dupmarked.realigned.bam \
                        gatk/$$(subst Up,,$$(subst _2,,$$(subst _1,,%)))K.bwa.sorted.dupmarked.realigned.bam \
                        gatk/%T.bwa.sorted.dupmarked.realigned.bam.bai \
-                       gatk/$$(subst Up,,$$(subst _2,,$$(subst _1,,%)))K.bwa.sorted.dupmarked.realigned.bam.bai
+                       gatk/$$(subst Up,,$$(subst _2,,$$(subst _1,,%)))K.bwa.sorted.dupmarked.realigned.bam.bai \
+                       $(VCFCONCAT) $(VCFSORT)
 	mkdir -p varscan
 	$(VARSCAN) somatic \
-		<($(SAMTOOLS) view -u -q 10 -F 1024 -f 2 $(word 1,$^) | $(SAMTOOLS) mpileup -f $(REFGENOME) -) \
-		<($(SAMTOOLS) view -u -q 10 -F 1024 -f 2 $(word 2,$^) | $(SAMTOOLS) mpileup -f $(REFGENOME) -) \
-		varscan/$*.varscan.part \
+		<($(SAMTOOLS) mpileup -f $(REFGENOME) -q 10 -B --rf 2 --ff 3852  $(word 2,$^) $(word 1,$^)) \
+		--mpileup 1 \
 		--min-coverage 2 \
 		--min-strands2 2 \
 		--min-var-freq 0.2 \
@@ -172,39 +196,28 @@ varscan/%.varscan.vcf: gatk/%T.bwa.sorted.dupmarked.realigned.bam \
 		--somatic-p-value 1 \
 		--strand-filter 1 \
 		--output-vcf 1 \
+		--output-snp $@.snp \
+		--output-indel $@.indel \
 		2>&1 | $(LOG)
-	mv varscan/$*.varscan.part.snp.vcf varscan/$*.varscan.snp.vcf
-	mv varscan/$*.varscan.part.indel.vcf varscan/$*.varscan.indel.vcf
+	$(VCFCONCAT) $@.snp $@.indel | $(VCFSORT) -c > $@.part
+	rm $@.snp $@.indel
+	mv $@.part $@
 
 #-----------	
 # SNPEFF
 #-----------
 
 .PHONY: snpeff
-snpeff: $(foreach S, $(SAMPLES), snpeff/$S.varscan.dbsnp.snpeff.dbNSFP.vcf.bgz.tbi)
+snpeff: $(foreach P, $(PAIRS), snpeff/$P.varscan.dbsnp.snpeff.vcf.bgz.tbi)
 
-snpeff/%.varscan.dbsnp.vcf: varscan/%.varscan.vcf /mnt/projects/generic/data/ncbi/common_no_known_medical_impact_20140826.vcf
+snpeff/%.varscan.dbsnp.vcf: varscan/%.varscan.vcf $(DBSNP)
 	mkdir -p snpeff
-	PWD=$(pwd)
-	(cd /data_synology/software/snpEff-3.6; java -XX:+UseParallelGC -XX:ParallelGCThreads=8 -jar SnpSift.jar annotate \
-		-v /mnt/projects/generic/data/ncbi/common_no_known_medical_impact_20140826.vcf \
-		<(cat $(PWD)/$< | perl -ne 's/\trs\d+\t/\t.\t/; print $$_;' -) \
-		2>&1 1>$(PWD)/$@.part) | $(LOG)
-	test -s $@.part
+	$(SNPSIFT) annotate -v -a $(DBSNP) $< 2>&1 1>$@.part | $(LOG)
 	mv $@.part $@
 
 snpeff/%.varscan.dbsnp.snpeff.vcf: snpeff/%.varscan.dbsnp.vcf
-	PWD=$(pwd)
-	(cd /data_synology/software/snpEff-3.6; java -XX:+UseParallelGC -XX:ParallelGCThreads=8 -Xmx4g -jar snpEff.jar -v -stats $(PWD)/snpeff/$*.snpeff.summary.html GRCm38.82 $(PWD)/$< 2>&1 1>$(PWD)/$@.part) | $(LOG)
-	mv $@.part $@
-
-snpeff/%.varscan.dbsnp.snpeff.dbNSFP.vcf: snpeff/%.varscan.dbsnp.snpeff.vcf /mnt/projects/generic/data/dbNSFP-2.6/dbNSFP2.6_variant.tsv.gz
-	PWD=$(pwd)
-	(cd /data_synology/software/snpEff-3.6; java -XX:+UseParallelGC -XX:ParallelGCThreads=8 -jar SnpSift.jar dbnsfp \
-		-v /mnt/projects/generic/data/dbNSFP-2.6/dbNSFP2.6_variant.tsv.gz \
-		-collapse \
-		-f SIFT_pred,SIFT_score,Polyphen2_HVAR_pred,Polyphen2_HVAR_score,SiPhy_29way_logOdds,LRT_pred,LRT_score,MutationTaster_pred,MutationTaster_score,MutationAssessor_pred,MutationAssessor_score,FATHMM_pred,FATHMM_score,RadialSVM_pred,RadialSVM_score,GERP++_RS,1000Gp1_AF,1000Gp1_AFR_AF,1000Gp1_EUR_AF,1000Gp1_AMR_AF,1000Gp1_ASN_AF,ESP6500_AA_AF,ESP6500_EA_AF,Uniprot_acc,Interpro_domain, \
-		$(PWD)/$< 2>&1 1>$(PWD)/$@.part) | $(LOG)
+	mkdir -p snpeff
+	$(SNPEFF) -stats snpeff/$*.snpeff.summary.html $< 2>&1 1>$@.part | $(LOG)
 	mv $@.part $@
 
 snpeff/%.vcf.bgz.tbi: snpeff/%.vcf
@@ -231,54 +244,16 @@ coverage/%.coverage.bedtools.txt: bwa/%.bwa.sorted.dupmarked.bam /mnt/projects/o
 #-----------	
 
 .PHONY: filtered-variants
-filtered-variants: $(foreach S, $(SAMPLES), filtered-variants/$S.tsv)
+filtered-variants: $(foreach P, $(PAIRS), filtered-variants/$P.tsv)
 
-filtered-variants/%.tsv: snpeff/%.varscan.dbsnp.snpeff.dbNSFP.vcf /mnt/projects/oskar/scripts/filter-variants.pl
+filtered-variants/%.tsv: snpeff/%.varscan.dbsnp.snpeff.vcf /mnt/projects/zohre/scripts/filter-variants.pl
 	mkdir -p filtered-variants
-	perl /mnt/projects/oskar/scripts/filter-variants.pl \
+	perl /mnt/projects/zohre/scripts/filter-variants.pl \
 		$< \
-		--patient $* \
-		--rmsk-file /mnt/projects/generic/data/hg19/hg19.rmsk.txt.gz \
-		--simpleRepeat-file /mnt/projects/generic/data/hg19/hg19.simpleRepeat.txt.gz \
-		--segdup-file /mnt/projects/generic/data/hg19/hg19.genomicSuperDups.txt.gz \
-		--blacklist-file /mnt/projects/generic/data/hg19/hg19.wgEncodeDacMapabilityConsensusExcludable.txt.gz \
-		--g1k-accessible /mnt/projects/generic/data/hg19/paired.end.mapping.1000G..pilot.bed.gz \
-		--ucscRetro /mnt/projects/generic/data/hg19/hg19.ucscRetroAli5.txt.gz \
-		--remission-variants-file /mnt/projects/hdall/results/remission-variants.tsv.gz \
-		--cosmic-mutation-file /mnt/projects/generic/data/cosmic/v67/CosmicMutantExport_v67_241013.tsv \
-		--evs-file /mnt/projects/generic/data/evs/ESP6500SI-V2-SSA137.updatedRsIds.chrAll.snps_indels.txt.gz \
-		--exac-file /mnt/projects/generic/data/ExAC/ExAC.r0.2.sites.vep.vcf.gz \
-		--clinvar-file /mnt/projects/generic/data/clinvar/clinvar_20140929.vcf.gz \
+		--sample $* \
+		--header \
+		--rmsk-file /data_synology/max/zohre/ucsc/mm10.rmsk.nochr.sorted.txt.gz \
+		--simpleRepeat-file /data_synology/max/zohre/ucsc/mm10.simpleRepeat.nochr.sorted.txt.gz \
+		--segdup-file /data_synology/max/zohre/ucsc/mm10.genomicSuperDups.nochr.sorted.txt.gz \
 		2>&1 1> $@.part | $(LOG)
 	mv $@.part $@
-	
-filtered-variants/StA.tsv: snpeff/StA_BS.varscan.dbsnp.snpeff.dbNSFP.vcf snpeff/StA_ES.varscan.dbsnp.snpeff.dbNSFP.vcf.bgz.tbi snpeff/StA_SS.varscan.dbsnp.snpeff.dbNSFP.vcf.bgz.tbi /mnt/projects/oskar/scripts/filter-variants.pl
-	mkdir -p filtered-variants
-	perl /mnt/projects/oskar/scripts/filter-variants.pl \
-		$< \
-		--patient StA_BS \
-		--mother snpeff/StA_ES.varscan.dbsnp.snpeff.dbNSFP.vcf.bgz \
-		--father snpeff/StA_SS.varscan.dbsnp.snpeff.dbNSFP.vcf.bgz \
-		--rmsk-file /mnt/projects/generic/data/hg19/hg19.rmsk.txt.gz \
-		--simpleRepeat-file /mnt/projects/generic/data/hg19/hg19.simpleRepeat.txt.gz \
-		--segdup-file /mnt/projects/generic/data/hg19/hg19.genomicSuperDups.txt.gz \
-		--blacklist-file /mnt/projects/generic/data/hg19/hg19.wgEncodeDacMapabilityConsensusExcludable.txt.gz \
-		--g1k-accessible /mnt/projects/generic/data/hg19/paired.end.mapping.1000G..pilot.bed.gz \
-		--ucscRetro /mnt/projects/generic/data/hg19/hg19.ucscRetroAli5.txt.gz \
-		--remission-variants-file /mnt/projects/hdall/results/remission-variants.tsv.gz \
-		--cosmic-mutation-file /mnt/projects/generic/data/cosmic/v67/CosmicMutantExport_v67_241013.tsv \
-		--evs-file /mnt/projects/generic/data/evs/ESP6500SI-V2-SSA137.updatedRsIds.chrAll.snps_indels.txt.gz \
-		--exac-file /mnt/projects/generic/data/ExAC/ExAC.r0.2.sites.vep.vcf.gz \
-		--clinvar-file /mnt/projects/generic/data/clinvar/clinvar_20140929.vcf.gz \
-		2>&1 1> $@.part | $(LOG)
-	mv $@.part $@
-
-#------------
-# PUBLISH ON WEB SERVER FOR MEDGEN TO DOWNLOAD
-#------------
-
-published/%: filtered-variants/%.tsv picard/%.agilent-sureselect.hs_metrics gatk/%.bwa.sorted.dupmarked.realigned.bam
-	mkdir -p published
-	scp $^ cf@biotrash:/var/www/html/medgen
-	ssh cf@biotrash 'mv /var/www/html/medgen/$*.tsv /var/www/html/medgen/$*.xls'
-	touch $@
