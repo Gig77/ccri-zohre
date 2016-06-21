@@ -7,6 +7,7 @@ LOG = perl -ne 'use POSIX qw(strftime); $$|=1; print strftime("%F %02H:%02M:%S "
 PROJECT_HOME=/mnt/projects/zohre
 FASTQ=/data_synology_nfs/max/zohre/exome_maus/fastq
 REFGENOME=/data_synology/max/zohre/GRCm38/Mus_musculus.GRCm38.dna.primary_assembly.fa
+CHRSIZES=/data_synology/max/zohre/GRCm38/Mus_musculus.GRCm38.dna.primary_assembly.chrsizes
 COVERBED=/data_synology/max/zohre/agilent/S0276129_Covered.mm10.bed
 DOCKER=docker run -i --rm --net=host -e DOCKER_UID=$$(id -u) -e DOCKER_UNAME=$$(id -un) -e DOCKER_GID=$$(id -g) -e DOCKER_GNAME=$$(id -gn) -e DOCKER_HOME=$$HOME \
        -v /home:/home \
@@ -18,6 +19,7 @@ DOCKER=docker run -i --rm --net=host -e DOCKER_UID=$$(id -u) -e DOCKER_UNAME=$$(
 BWA=flock -x .lock /data_synology/software/bwa-0.7.12/bwa
 SAMTOOLS=/data_synology/software/samtools-0.1.19/samtools
 SAMTOOLS131=/data_synology/software/samtools-1.3.1/samtools
+BEDTOOLS=/data_synology/software/bedtools-2.17.0/bin/bedtools
 PICARD=$(DOCKER) biowaste:5000/ccri/picard-2.2.2 java -XX:+UseParallelGC -XX:ParallelGCThreads=8 -Xmx2g -Djava.io.tmpdir=`pwd`/tmp -jar /usr/picard/picard.jar
 GATK=java -XX:+UseParallelGC -XX:ParallelGCThreads=8 -Xmx4g -jar /data_synology/software/GenomeAnalysisTK-3.3.0/GenomeAnalysisTK.jar
 VARSCAN=java -jar /data_synology/software/varscan-2.4.2/VarScan.v2.4.2.jar
@@ -37,7 +39,7 @@ SAMPLES_TUMOR=$(addsuffix T,$(PAIRS))
 SAMPLES_NORMAL=$(addsuffix K,$(subst Up,,$(subst _2,,$(subst _1,,$(PAIRS))))) 
 SAMPLES=$(SAMPLES_TUMOR) $(SAMPLES_NORMAL)
 
-all: bwa picard gatk varscan snpeff filtered-variants sex/allsamples.readcount.sexchr.txt
+all: bwa picard gatk varscan snpeff cna filtered-variants sex/allsamples.readcount.sexchr.txt
 
 #include /mnt/projects/generic/scripts/rna-seq/fastqc.mk
 
@@ -240,7 +242,7 @@ varscan/all_normals.varscan.vcf.gz: gatk/all_normals.bwa.sorted.dupmarked.realig
 
 snps/allsamples.vcf.gz:  $(foreach S, $(SAMPLES), gatk/$S.bwa.sorted.dupmarked.realigned.bam)
 	mkdir -p snps
-	$(SAMTOOLS131) mpileup -ugf $(REFGENOME) $^ | \
+	$(SAMTOOLS131) mpileup -t DP,AD,ADF,ADR -ugf $(REFGENOME) $^ | \
 		$(BCFTOOLS) call -vmO u | \
 		$(BCFTOOLS) filter -i'%QUAL>10' -O z -o $@.part -
 	mv $@.part $@
@@ -273,20 +275,6 @@ snpeff/%.vcf.bgz.tbi: snpeff/%.vcf
 	mv snpeff/$*.vcf.bgz.part snpeff/$*.vcf.bgz
 	/data_synology/software/tabix-0.2.6/tabix -p vcf snpeff/$*.vcf.bgz
 
-#---------------
-# COVERAGE PLOT
-#---------------
-
-coverage/coverage.png: $(foreach S, $(SAMPLES_SURESELECTXT), coverage/$S.coverage.bedtools.txt) /mnt/projects/oskar/scripts/coverage-plot.R
-	Rscript /mnt/projects/oskar/scripts/coverage-plot.R
-	mv $@.part $@
-	
-coverage/%.coverage.bedtools.txt: bwa/%.bwa.sorted.dupmarked.bam /mnt/projects/oskar/data/S06588914_Covered.nochr.bed
-	mkdir -p coverage
-	$(SAMTOOLS) view -bq 1 -F 3852 $< | /data_synology/software/bedtools-2.17.0/bin/bedtools coverage -hist -abam - -b $(word 2, $^) | grep ^all > $@.part
-	mv $@.part $@
-
-
 #-----------	
 # FILTERED VARIANTS LIST
 #-----------	
@@ -312,9 +300,9 @@ filtered-variants/%.tsv: snpeff/%.varscan.dbsnp.snpeff.vcf /mnt/projects/zohre/s
 #-----------	
 	
 .PHONY: cna
-cna: cna/allpatients.genome-covarege.pdf
+cna: cna/allpatients.genome-coverage.pdf
 
-cna/allpatients.genome-covarege.pdf: $(foreach P, $(PAIRS), cna/$P.genome-coverage.pdf)
+cna/allpatients.genome-coverage.pdf: $(foreach P, $(filter-out test, $(PAIRS)), cna/$P.genome-coverage.pdf)
 	gs -dBATCH -dNOPAUSE -q -sDEVICE=pdfwrite -sOutputFile=$@.part $^
 	mv $@.part $@
 	rm $^
@@ -336,24 +324,37 @@ cna/%.snp-profile.pdf: cna/%T.genome-coverage.tsv \
 
 cna/%.genome-coverage.pdf: cna/%T.genome-coverage.tsv \
                		       cna/$$(subst Up,,$$(subst _2,,$$(subst _1,,%)))K.genome-coverage.tsv \
+						   cna/gcPerBin.tsv \
 						   $(PLOTSEGCOV)
 	mkdir -p cna
 	Rscript $(PLOTSEGCOV) \
 		--patient $* \
 		--tumor $(word 1,$^) \
 		--normal $(word 2,$^) \
+		--gccontent $(word 3,$^) \
 		--output $@.part
 	mv $@.part $@
 
-cna/%.genome-coverage.tsv: gatk/%.bwa.sorted.dupmarked.realigned.bam $(SEGMENTCOV) /data_synology/max/zohre/GRCm38/Mus_musculus.GRCm38.dna.primary_assembly.chrsizes
+cna/%.genome-coverage.tsv: gatk/%.bwa.sorted.dupmarked.realigned.bam $(SEGMENTCOV) $(CHRSIZES)
 	mkdir -p cna
-	$(SAMTOOLS) depth -Q 1 $< | \
+	$(SAMTOOLS) depth -Q 10 $< | \
 		perl $(SEGMENTCOV) \
 			--sample $* \
 			--bin-size 250000 \
-			--chr-sizes /data_synology/max/zohre/GRCm38/Mus_musculus.GRCm38.dna.primary_assembly.chrsizes \
+			--chr-sizes $(CHRSIZES) \
 		2>&1 1>$@.part | $(LOG)
 	mv $@.part $@
+	
+
+cna/gcPerBin.tsv: $(REFGENOME) $(CHRSIZES)
+	$(BEDTOOLS) nuc -fi $(REFGENOME) -bed <($(BEDTOOLS) makewindows -g $(CHRSIZES) -w 250000) | cut -f 1-2,5 | grep -v "^#" > $@.part
+	mv $@.part $@
+
+#cna/%.coverage.bedtools.txt: bwa/%.bwa.sorted.dupmarked.bam $(COVERBED)
+#	mkdir -p cna
+#	$(SAMTOOLS) view -bq 1 -F 3852 $< | \
+#		$(BEDTOOLS) coverage -hist -abam - -b $(word 2, $^) | grep ^all > $@.part
+#	mv $@.part $@
 	
 #----------
 # sex
@@ -366,5 +367,5 @@ sex/allsamples.readcount.sexchr.txt: $(foreach S, $(SAMPLES), sex/$S.readcount.s
 	
 sex/%.readcount.sexchr.txt: bwa/%.bwa.sorted.dupmarked.bam
 	mkdir -p sex
-	echo $* $$(samtools view -c -f 2 -F 3840 -q 40 $< Y) $$(samtools view -c -f 2 -F 3840 -q 40 $<) > $@.part
+	echo $* $$($(SAMTOOLS) view -c -f 2 -F 3840 -q 40 $< Y) $$($(SAMTOOLS) view -c -f 2 -F 3840 -q 40 $<) > $@.part
 	mv $@.part $@
