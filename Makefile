@@ -17,6 +17,7 @@ DOCKER=docker run -i --rm --net=host -e DOCKER_UID=$$(id -u) -e DOCKER_UNAME=$$(
        -w $$(pwd)
 BWA=flock -x .lock /data_synology/software/bwa-0.7.12/bwa
 SAMTOOLS=/data_synology/software/samtools-0.1.19/samtools
+SAMTOOLS131=/data_synology/software/samtools-1.3.1/samtools
 PICARD=$(DOCKER) biowaste:5000/ccri/picard-2.2.2 java -XX:+UseParallelGC -XX:ParallelGCThreads=8 -Xmx2g -Djava.io.tmpdir=`pwd`/tmp -jar /usr/picard/picard.jar
 GATK=java -XX:+UseParallelGC -XX:ParallelGCThreads=8 -Xmx4g -jar /data_synology/software/GenomeAnalysisTK-3.3.0/GenomeAnalysisTK.jar
 VARSCAN=java -jar /data_synology/software/varscan-2.4.2/VarScan.v2.4.2.jar
@@ -25,11 +26,18 @@ SNPSIFT=java -Xmx4g -jar /data_synology/software/snpeff-4.2/SnpSift.jar
 DBSNP=/data_synology/max/zohre/snps/ftp.ncbi.nih.gov/snp/organisms/mouse_10090/VCF/mouse.dbSnp146.vcf.gz
 VCFCONCAT=/data_synology/software/vcftools_0.1.10/bin/vcf-concat
 VCFSORT=/data_synology/software/vcftools_0.1.10/bin/vcf-sort
+BCFTOOLS=/data_synology/software/bcftools-1.3.1/bcftools
+VCFTOOLS=/data_synology/software/vcftools-0.1.14/bin/vcftools
+VCFUTILS=/data_synology/software/bcftools-1.3.1/vcfutils.pl
+SEGMENTCOV=/mnt/projects/hdall/scripts/cnv/get-segment-coverage.pl
+PLOTSEGCOV=/mnt/projects/zohre/scripts/plot-segment-coverage.R
 
-PAIRS=test 11291 11682 11689 11232 11221Up 11746_1 9193_1 11746_2 9193_2
-SAMPLES=$(addsuffix T,$(PAIRS)) $(addsuffix K,$(subst Up,,$(subst _2,,$(subst _1,,$(PAIRS))))) 
+PAIRS=test 11291 11682 11689 11689_2 11232 11221Up 11746_1 9193_1 11746_2 9193_2
+SAMPLES_TUMOR=$(addsuffix T,$(PAIRS)) 
+SAMPLES_NORMAL=$(addsuffix K,$(subst Up,,$(subst _2,,$(subst _1,,$(PAIRS))))) 
+SAMPLES=$(SAMPLES_TUMOR) $(SAMPLES_NORMAL)
 
-all: bwa picard gatk varscan snpeff filtered-variants
+all: bwa picard gatk varscan snpeff filtered-variants sex/allsamples.readcount.sexchr.txt
 
 #include /mnt/projects/generic/scripts/rna-seq/fastqc.mk
 
@@ -101,6 +109,10 @@ gatk/%.bwa.sorted.dupmarked.realigned.bam: bwa/%.bwa.sorted.dupmarked.bam gatk/%
 		2>&1 | $(LOG)
 	mv $@.part $@
 	rm -f gatk/%.bwa.sorted.dupmarked.realigned.bam.part.bai
+
+gatk/all_normals.bwa.sorted.dupmarked.realigned.bam: $(foreach S, $(SAMPLES_NORMAL), gatk/$S.bwa.sorted.dupmarked.realigned.bam)
+	$(SAMTOOLS) merge $@.part $^
+	mv $@.part $@
 	
 gatk/%.bwa.sorted.dupmarked.realigned.bam.bai: gatk/%.bwa.sorted.dupmarked.realigned.bam
 	rm -f $@
@@ -176,8 +188,10 @@ picard/combined.picard.hs_metrics.tsv: $(foreach S, $(SAMPLES), picard/$S.hs_met
 #-----------	
 
 .PHONY: varscan
-varscan: $(foreach P, $(PAIRS), varscan/$P.varscan.vcf)
+varscan: $(foreach P, $(PAIRS), varscan/$P.varscan.vcf) \
+		 varscan/all_normals.varscan.vcf.gz
 
+# tumor/normal comparison
 varscan/%.varscan.vcf: gatk/%T.bwa.sorted.dupmarked.realigned.bam \
                        gatk/$$(subst Up,,$$(subst _2,,$$(subst _1,,%)))K.bwa.sorted.dupmarked.realigned.bam \
                        gatk/%T.bwa.sorted.dupmarked.realigned.bam.bai \
@@ -189,7 +203,7 @@ varscan/%.varscan.vcf: gatk/%T.bwa.sorted.dupmarked.realigned.bam \
 		--mpileup 1 \
 		--min-coverage 2 \
 		--min-strands2 2 \
-		--min-var-freq 0.2 \
+		--min-var-freq 0.1 \
 		--normal-purity 1 \
 		--tumor-purity 0.95 \
 		--p-value 1 \
@@ -203,6 +217,40 @@ varscan/%.varscan.vcf: gatk/%T.bwa.sorted.dupmarked.realigned.bam \
 	rm $@.snp $@.indel
 	mv $@.part $@
 
+# all variants in combined normals for filtering of somatic mutations
+varscan/all_normals.varscan.vcf.gz: gatk/all_normals.bwa.sorted.dupmarked.realigned.bam gatk/all_normals.bwa.sorted.dupmarked.realigned.bam.bai
+	mkdir -p varscan
+	$(VARSCAN) mpileup2cns \
+		<($(SAMTOOLS) mpileup -f $(REFGENOME) -q 10 -B --rf 2 --ff 3852 $<) \
+		--min-coverage 3 \
+		--min-reads2 3 \
+		--min-avg-qual 20 \
+		--min-var-freq 0 \
+		--p-value 1 \
+		--strand-filter 0 \
+		--output-vcf 1 \
+		--variants 1 \
+		2>&1 1>$@.part | $(LOG)
+	bgzip -c $@.part > $@
+	tabix -p vcf $@ 
+
+#-----------	
+# SNP calling
+#-----------
+
+snps/allsamples.vcf.gz:  $(foreach S, $(SAMPLES), gatk/$S.bwa.sorted.dupmarked.realigned.bam)
+	mkdir -p snps
+	$(SAMTOOLS131) mpileup -ugf $(REFGENOME) $^ | \
+		$(BCFTOOLS) call -vmO u | \
+		$(BCFTOOLS) filter -i'%QUAL>10' -O z -o $@.part -
+	mv $@.part $@
+	tabix -p vcf $@
+	
+snps/allsamples.noMissing.vcf.gz: snps/allsamples.vcf.gz
+	$(VCFTOOLS) --gzvcf $< --remove-indv testT --remove-indv testK --max-missing 1 --recode --stdout | bgzip -c > $@.part
+	mv $@.part $@
+	tabix -p vcf $@
+  
 #-----------	
 # SNPEFF
 #-----------
@@ -246,7 +294,7 @@ coverage/%.coverage.bedtools.txt: bwa/%.bwa.sorted.dupmarked.bam /mnt/projects/o
 .PHONY: filtered-variants
 filtered-variants: $(foreach P, $(PAIRS), filtered-variants/$P.tsv)
 
-filtered-variants/%.tsv: snpeff/%.varscan.dbsnp.snpeff.vcf /mnt/projects/zohre/scripts/filter-variants.pl
+filtered-variants/%.tsv: snpeff/%.varscan.dbsnp.snpeff.vcf /mnt/projects/zohre/scripts/filter-variants.pl varscan/all_normals.varscan.vcf.gz
 	mkdir -p filtered-variants
 	perl /mnt/projects/zohre/scripts/filter-variants.pl \
 		$< \
@@ -255,5 +303,68 @@ filtered-variants/%.tsv: snpeff/%.varscan.dbsnp.snpeff.vcf /mnt/projects/zohre/s
 		--rmsk-file /data_synology/max/zohre/ucsc/mm10.rmsk.nochr.sorted.txt.gz \
 		--simpleRepeat-file /data_synology/max/zohre/ucsc/mm10.simpleRepeat.nochr.sorted.txt.gz \
 		--segdup-file /data_synology/max/zohre/ucsc/mm10.genomicSuperDups.nochr.sorted.txt.gz \
+		--normal-variants varscan/all_normals.varscan.vcf.gz \
 		2>&1 1> $@.part | $(LOG)
+	mv $@.part $@
+
+#-----------	
+# CNA
+#-----------	
+	
+.PHONY: cna
+cna: cna/allpatients.genome-covarege.pdf
+
+cna/allpatients.genome-covarege.pdf: $(foreach P, $(PAIRS), cna/$P.genome-coverage.pdf)
+	gs -dBATCH -dNOPAUSE -q -sDEVICE=pdfwrite -sOutputFile=$@.part $^
+	mv $@.part $@
+	rm $^
+
+cna/%.snp-profile.pdf: cna/%T.genome-coverage.tsv \
+               		   cna/$$(subst Up,,$$(subst _2,,$$(subst _1,,%)))K.genome-coverage.tsv \
+               		   snpeff/%T.varscan.dbsnp.vcf \
+               		   snpeff/$$(subst Up,,$$(subst _2,,$$(subst _1,,%)))K.varscan.dbsnp.vcf \
+               		   /mnt/projects/generic/scripts/snp-profile.R
+	mkdir -p snp-profile
+	Rscript /mnt/projects/generic/scripts/snp-profile.R \
+		--sample-id $* \
+		--tumor-coverage $(word 1, $^) \
+		--normal-coverage $(word 2, $^) \
+		--tumor-vcf $(word 3, $^) \
+		--normal-vcf $(word 4, $^) \
+		--plot-output-file $@.part
+	mv $@.part $@
+
+cna/%.genome-coverage.pdf: cna/%T.genome-coverage.tsv \
+               		       cna/$$(subst Up,,$$(subst _2,,$$(subst _1,,%)))K.genome-coverage.tsv \
+						   $(PLOTSEGCOV)
+	mkdir -p cna
+	Rscript $(PLOTSEGCOV) \
+		--patient $* \
+		--tumor $(word 1,$^) \
+		--normal $(word 2,$^) \
+		--output $@.part
+	mv $@.part $@
+
+cna/%.genome-coverage.tsv: gatk/%.bwa.sorted.dupmarked.realigned.bam $(SEGMENTCOV) /data_synology/max/zohre/GRCm38/Mus_musculus.GRCm38.dna.primary_assembly.chrsizes
+	mkdir -p cna
+	$(SAMTOOLS) depth -Q 1 $< | \
+		perl $(SEGMENTCOV) \
+			--sample $* \
+			--bin-size 250000 \
+			--chr-sizes /data_synology/max/zohre/GRCm38/Mus_musculus.GRCm38.dna.primary_assembly.chrsizes \
+		2>&1 1>$@.part | $(LOG)
+	mv $@.part $@
+	
+#----------
+# sex
+#----------
+
+sex/allsamples.readcount.sexchr.txt: $(foreach S, $(SAMPLES), sex/$S.readcount.sexchr.txt)
+	echo sample readsY readsTotal > $@.part
+	cat $^ >> $@.part
+	mv $@.part $@
+	
+sex/%.readcount.sexchr.txt: bwa/%.bwa.sorted.dupmarked.bam
+	mkdir -p sex
+	echo $* $$(samtools view -c -f 2 -F 3840 -q 40 $< Y) $$(samtools view -c -f 2 -F 3840 -q 40 $<) > $@.part
 	mv $@.part $@

@@ -10,7 +10,7 @@ use Getopt::Long;
 use Carp;
 
 my ($vcf_out, $header, $rejected_variants_file, $sample);
-my ($rmsk_file, $simplerepeat_file, $segdup_file);
+my ($rmsk_file, $simplerepeat_file, $segdup_file, $normalvariants_file);
 GetOptions
 (
 	"sample=s" => \$sample,  # sample ID
@@ -18,7 +18,8 @@ GetOptions
 	"header" => \$header,  # if set, write header line to output
 	"rmsk-file=s" => \$rmsk_file, # TABIX indexed UCSC table rmsk
 	"simpleRepeat-file=s" => \$simplerepeat_file, # TABIX indexed UCSC table rmsk
-	"segdup-file=s" => \$segdup_file # TABIX indexed UCSC table genomicSuperDups
+	"segdup-file=s" => \$segdup_file, # TABIX indexed UCSC table genomicSuperDups
+	"normal-variants=s" => \$normalvariants_file # TABIX indexed VCF with variants identified in normal samples
 );
 
 # TABLE: filtered-variants
@@ -52,7 +53,8 @@ if ($header)
 	print "aa_change\t";
 	print "SnpEffANN\t";
 	print "repeat\t";
-	print "tsegdup\n";
+	print "tsegdup\t";
+	print "numreads_allnormals(avgbqual)\n";
 #	exit;
 }
 
@@ -64,6 +66,7 @@ croak "ERROR: --sample not specified" if (!$sample);
 croak "ERROR: --rmsk-file not specified" if (!$rmsk_file);
 croak "ERROR: --simpleRepeat-file not specified" if (!$simplerepeat_file);
 croak "ERROR: --segdup-file not specified" if (!$segdup_file);
+croak "ERROR: --normal-variants not specified" if (!$normalvariants_file);
 
 
 my $rem_sample = "NORMAL"; 
@@ -100,6 +103,7 @@ INFO(scalar(keys(%isCanonical))." mappings read from file $knownToEnsemblFile");
 my $rmsk = Tabix->new(-data => $rmsk_file);
 my $simpleRepeat = Tabix->new(-data => $simplerepeat_file);
 my $segdup = Tabix->new(-data => $segdup_file);
+my $normalvariants = Tabix->new(-data => $normalvariants_file);
 
 $| = 1; # turn on autoflush
 
@@ -121,7 +125,7 @@ die "ERROR: Sample name $rem_sample not found!\n" if ($rem_sample ne $samples[0]
 die "ERROR: Sample name $tum_sample not found!\n" if ($tum_sample ne $samples[0] and $tum_sample ne $samples[1]);
 
 my ($tot_var, $filtered_alt, $filtered_germ) = (0, 0, 0);
-my ($numrep, $numsegdup) = (0, 0);
+my ($numrep, $numsegdup, $numnormal) = (0, 0, 0);
 my %qual_num;
 
 my %somatic_stati = 
@@ -186,10 +190,10 @@ while (my $line = $vcf->next_line())
 	##FORMAT=<ID=DP4,Number=1,Type=String,Description="Strand read counts: ref/fwd, ref/rev, var/fwd, var/rev">
 	($ref_fwd, $ref_rev, $var_fwd, $var_rev) = split(",", $x->{gtypes}{$tum_sample}{DP4});
 
-	my (@repeats, @dups);
 	my ($chr, $pos) = ($x->{CHROM}, $x->{POS});
 
 	# ----- annotate overlapping repeat regions
+	my @repeats;
 	{
 		my $iter = $rmsk->query($chr, $pos-1, $pos+1);
 		if ($iter and $iter->{_})
@@ -216,6 +220,7 @@ while (my $line = $vcf->next_line())
 	$numrep ++ if (@repeats > 0);
 
 	# ----- annotate segmental duplications
+	my @dups;
 	{
 		my $iter = $segdup->query($chr, $pos-1, $pos+1);
 		if ($iter and $iter->{_})
@@ -228,18 +233,37 @@ while (my $line = $vcf->next_line())
 		}		
 		$numsegdup ++ if (@dups > 0);
 	}	
+
+	# ----- annotate variants also found in normal samples
+	my @normals;
+	{
+		my $iter = $normalvariants->query($chr, $pos-1, $pos);
+		if ($iter and $iter->{_})
+		{
+			while (my $line = $normalvariants->read($iter)) 
+			{
+				my ($nchr, $npos, $nid, $nref, $nalt, $nqual, $nfilter, $ninfo, $nformat, $ngtstr) = split("\t", $line);
+				if ($nchr eq $chr and $npos == $pos and $x->{REF} eq $nref and $x->{ALT}->[0] eq $nalt) {
+					my ($gt, $gq, $spd, $dp, $rd, $ad, $freq, $pval, $rbq, $abq, $rdf, $rdr, $adf, $adr) = split(":", $ngtstr);
+					push(@normals, sprintf("%d(%d)", $ad, $abq));
+					last;
+				}
+			}
+		}		
+		$numnormal ++ if (@normals > 0);
+	}	
 	
 	my $reject = 0;
 	my @reject_because;
 	my $both_strands = ($var_fwd and $var_rev);
 
-	if ($somatic_status == 2 and $ad_rem_alt > 0) { $reject = 1; push(@reject_because, "present normal"); };
-	if ($somatic_status == 2 and !$both_strands) { $reject = 1; push(@reject_because, "single strand"); };
+	if ($x->{ID} and $x->{ID} ne ".")  { $reject = 1; push(@reject_because, "dbSNP"); };  
+	if (!$both_strands) { $reject = 1; push(@reject_because, "single strand"); };
 	if ($somatic_status == 5) { $reject = 1; push(@reject_because, "unknown somatic status"); };
 	if ($somatic_pvalue > 0.1) { $reject = 1; push(@reject_because, "somatic p-value"); };
 	if (@repeats > 0) { $reject = 1; push(@reject_because, "repetitive region"); };
 	if (@dups > 0) { $reject = 1; push(@reject_because, "segmental duplication"); };
-	if ($x->{ID} and $x->{ID} ne ".")  { $reject = 1; push(@reject_because, "dbSNP"); };  
+	if ($somatic_status != 3 and @normals > 0) { $reject = 1; push(@reject_because, "present in normals"); };
 	
 	$line =~ s/^([^\t]+\t[^\t]+\t[^\t]+\t[^\t]+\t[^\t]+\t[^\t]+\t)[^\t]+/$1REJECT/ if ($reject);
 	
@@ -274,7 +298,8 @@ while (my $line = $vcf->next_line())
 	print defined $somatic_pvalue ? $somatic_pvalue : "", "\t";
 	print "$aa_change\t";
 	print "ANN=",$x->{INFO}{ANN},"\t";
-	print join(',', @repeats), "\t", join(',', @dups);
+	print join(',', @repeats), "\t", join(',', @dups), "\t";
+	print join(',', @normals);
 	print "\n";		
 }
 $vcf->close();
@@ -292,6 +317,7 @@ if ($debug)
 	INFO("  Excluded due to missing alternative allele: $filtered_alt");
 	INFO("  $numrep variants annotated with overlapping repeat.");
 	INFO("  $numsegdup variants annotated with overlapping segmental duplication.");
+	INFO("  $numnormal variants also present in combined normal samples.");
 }
 
 # ------------------------------------------
@@ -359,6 +385,7 @@ sub get_impact
 		delete $all_genes{$gene};
 		$add_genes = join(",", keys(%all_genes));
 	
+		$combined_effect = (values(%{$genes_by_impact{$combined_impact}{$gene}}))[0];
 		foreach my $t (keys(%{$genes_by_impact{$combined_impact}{$gene}}))
 		{
 			if ($isCanonical{$t}) {
