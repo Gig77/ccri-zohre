@@ -33,6 +33,7 @@ VCFTOOLS=/data_synology/software/vcftools-0.1.14/bin/vcftools
 VCFUTILS=/data_synology/software/bcftools-1.3.1/vcfutils.pl
 SEGMENTCOV=/mnt/projects/hdall/scripts/cnv/get-segment-coverage.pl
 PLOTSEGCOV=/mnt/projects/zohre/scripts/plot-segment-coverage.R
+CNVBINSIZE=250000
 
 PAIRS=test 11291 11682 11689 11689_2 11232 11221Up 11746_1 9193_1 11746_2 9193_2
 SAMPLES_TUMOR=$(addsuffix T,$(PAIRS)) 
@@ -300,7 +301,13 @@ filtered-variants/%.tsv: snpeff/%.varscan.dbsnp.snpeff.vcf /mnt/projects/zohre/s
 #-----------	
 	
 .PHONY: cna
-cna: cna/allpatients.genome-coverage.pdf
+cna: cna/allpatients.genome-coverage.pdf \
+     cna/allpatients.CDKN2AandB-4-88340353-90216312.region-coverage.pdf \
+     cna/allpatients.TRP53-11-69430664-69741568.region-coverage.pdf \
+     cna/allpatients.STAG2-X-41222539-43256502.region-coverage.pdf \
+     cna/allpatients.EZH2-6-46688433-48436871.region-coverage.pdf \
+     cna/allpatients.SETD2-9-110188449-110962781.region-coverage.pdf
+     
 
 cna/allpatients.genome-coverage.pdf: $(foreach P, $(filter-out test, $(PAIRS)), cna/$P.genome-coverage.pdf)
 	gs -dBATCH -dNOPAUSE -q -sDEVICE=pdfwrite -sOutputFile=$@.part $^
@@ -319,7 +326,8 @@ cna/%.snp-profile.pdf: cna/%T.genome-coverage.tsv \
 		--normal-coverage $(word 2, $^) \
 		--tumor-vcf $(word 3, $^) \
 		--normal-vcf $(word 4, $^) \
-		--plot-output-file $@.part
+		--plot-output-file $@.part \
+		2>&1 | $(LOG)
 	mv $@.part $@
 
 cna/%.genome-coverage.pdf: cna/%T.genome-coverage.tsv \
@@ -332,7 +340,9 @@ cna/%.genome-coverage.pdf: cna/%T.genome-coverage.tsv \
 		--tumor $(word 1,$^) \
 		--normal $(word 2,$^) \
 		--gccontent $(word 3,$^) \
-		--output $@.part
+		--output $@.part \
+		2>&1 | $(LOG)
+		
 	mv $@.part $@
 
 cna/%.genome-coverage.tsv: gatk/%.bwa.sorted.dupmarked.realigned.bam $(SEGMENTCOV) $(CHRSIZES)
@@ -340,15 +350,37 @@ cna/%.genome-coverage.tsv: gatk/%.bwa.sorted.dupmarked.realigned.bam $(SEGMENTCO
 	$(SAMTOOLS) depth -Q 10 $< | \
 		perl $(SEGMENTCOV) \
 			--sample $* \
-			--bin-size 250000 \
+			--bin-size $(CNVBINSIZE) \
 			--chr-sizes $(CHRSIZES) \
 		2>&1 1>$@.part | $(LOG)
 	mv $@.part $@
 	
 
 cna/gcPerBin.tsv: $(REFGENOME) $(CHRSIZES)
-	$(BEDTOOLS) nuc -fi $(REFGENOME) -bed <($(BEDTOOLS) makewindows -g $(CHRSIZES) -w 250000) | cut -f 1-2,5 | grep -v "^#" > $@.part
+	$(BEDTOOLS) nuc -fi $(REFGENOME) -bed <($(BEDTOOLS) makewindows -g $(CHRSIZES) -w $(CNVBINSIZE)) | cut -f 1-2,5 | grep -v "^#" > $@.part
 	mv $@.part $@
+
+cna/%.exon-coverage.tsv: gatk/%.bwa.sorted.dupmarked.realigned.bam $(COVERBED) /mnt/projects/hdall/scripts/cnv/get-exon-coverage.pl
+	$(BEDTOOLS) coverage -abam $< -b $(COVERBED) 2>&1 1>$@.part | $(LOG)
+	mv $@.part $@
+
+cna/sample-%.region-coverage.pdf: cna/$$(word 1, $$(subst ., , %))T.exon-coverage.tsv cna/$$(subst Up,,$$(subst _2,,$$(subst _1,,$$(word 1, $$(subst ., , %)))))K.exon-coverage.tsv /mnt/projects/zohre/scripts/cov-plot-region.R
+	Rscript /mnt/projects/zohre/scripts/cov-plot-region.R \
+		--patient $(word 1, $(subst ., , $*)) \
+		--sample1 $(word 1,$^) \
+		--remission $(word 2,$^) \
+		--output $@.part \
+		--region-name $(word 1, $(subst -, , $(word 2, $(subst ., , $*)))) \
+		--display-chrom $(word 2, $(subst -, , $*)) \
+		--display-start $(word 3, $(subst -, , $*)) \
+		--display-end $(word 4, $(subst -, , $*)) \
+		2>&1 | $(LOG)
+	mv $@.part $@
+
+cna/allpatients.%.region-coverage.pdf: $(foreach P, $(filter-out test, $(PAIRS)), cna/sample-$P.%.region-coverage.pdf)
+	gs -dBATCH -dNOPAUSE -q -sDEVICE=pdfwrite -sOutputFile=$@.part $^
+	mv $@.part $@
+	rm $^
 
 #cna/%.coverage.bedtools.txt: bwa/%.bwa.sorted.dupmarked.bam $(COVERBED)
 #	mkdir -p cna
