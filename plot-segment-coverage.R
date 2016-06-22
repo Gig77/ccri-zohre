@@ -14,6 +14,7 @@ opt <- parse_args(OptionParser(option_list=option_list))
 if (is.na(opt$patient)) stop("patient ID not specified")
 if (is.na(opt$tumor)) stop("tumor coverage file not specified")
 if (is.na(opt$normal)) stop("normal coverage file not specified")
+if (is.na(opt$gccontent)) stop("GC content file not specified")
 if (is.na(opt$output)) stop("output file not specified")
 
 # for test purposes
@@ -25,29 +26,42 @@ names(t) <- c("chr", "bin", "tumor")
 n <- read.delim(opt$normal, header=F, colClasses=c("factor", "integer", "numeric"))
 names(n) <- c("chr", "bin", "normal")
 m <- merge(n, t, by=c("chr", "bin"))
+gc <- read.delim(opt$gccontent, header=F, colClasses=c("factor", "integer", "numeric"))
+names(gc) <- c("chr", "bin", "gc")
+gc$gc.sq <- gc$gc^2
+gc$gc.cub <- gc$gc^3
+m <- merge(m, gc, by=c("chr", "bin"))
 
-# remove bins with very low read counts in tumor and normal
-#m <- m[m$tumor > 10000 | m$normal > 10000,]
+# remove freak bins and sort
+m <- m[(m$tumor > 100 | m$normal > 100) & m$gc>0.35,]
+m <- m[order(m$chr, m$bin),]
 
+# compute coverage ratios, trim outliers
 m$ratio <- log2((m[,"tumor"]+0.1 / sum(m[,"tumor"])) / (m[,"normal"]+0.1 / sum(m[,"normal"])))
 m$ratio <- m$ratio - ifelse(!is.null(normal.chrs), mean(m$ratio[which(m$chr %in% normal.chrs & is.finite(m$ratio))]), 0)
 m$ratio[m$ratio > 1.5] <- 1.5
 m$ratio[m$ratio < -1.5] <- -1.5
 
-if (!is.null(opt$gccontent)) {
-  gc <- read.delim(opt$gccontent, header=F, colClasses=c("factor", "integer", "numeric"))
-  names(gc) <- c("chr", "bin", "gc")
-  gc$gc.sq <- gc$gc^2
-  gc$gc.cub <- gc$gc^3
-  m <- merge(m, gc, by=c("chr", "bin"))
-  fit.ratio <- lm(m$ratio ~ gc + gc.sq + gc.cub, data=m) ; summary(fit.ratio)
-  m$ratio <- m$ratio - fit.ratio$coeff[2] * (m$gc-mean(m$gc))
-  m$ratio <- m$ratio - fit.ratio$coeff[3] * (m$gc.sq-mean(m$gc.sq))
-  m$ratio <- m$ratio - fit.ratio$coeff[4] * (m$gc.cub-mean(m$gc.cub))
-  m$ratio[m$ratio > 1.5] <- 1.5
-  m$ratio[m$ratio < -1.5] <- -1.5
-}
-m <- m[order(m$chr, m$bin),]
+# fit model, exclude crazy Y, include chromosome as factor because of possible aneuploidies
+fit.ratio <- lm(ratio ~ chr + gc + gc.sq + gc.cub, data=m[m$chr != "Y",])
+summary(fit.ratio)
+
+# check fit visually
+#m.chr <- m[m$chr == "6",] ; m.chr <- m.chr[order(m.chr$gc),]
+#plot(ratio~gc, data=m.chr, cex=0.3)
+#lines(m.chr$gc, predict(fit.ratio, m.chr), col="orange", lwd=5)
+
+# regress out gc
+m$ratio <- m$ratio - fit.ratio$coeff["gc"] * (m$gc-mean(m$gc))
+m$ratio <- m$ratio - fit.ratio$coeff["gc.sq"] * (m$gc.sq-mean(m$gc.sq))
+m$ratio <- m$ratio - fit.ratio$coeff["gc.cub"] * (m$gc.cub-mean(m$gc.cub))
+m$ratio[m$ratio > 1.5] <- 1.5
+m$ratio[m$ratio < -1.5] <- -1.5
+
+# check again
+#m.chr <- m[m$chr == "6",] ; m.chr <- m.chr[order(m.chr$gc),]
+#plot(ratio~gc, data=m.chr, cex=0.3)
+#abline(0,0)
 
 set.seed(25)
 CNA.object <-CNA(genomdat = m[,"ratio"], chrom = m[,"chr"], maploc = m[,"bin"], data.type = 'logratio')
