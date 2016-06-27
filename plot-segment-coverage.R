@@ -7,7 +7,8 @@ option_list <- list(
 		make_option("--tumor", type="character", help="tumor coverage data file"),
 		make_option("--normal", type="character", help="remission coverage data file"),
 		make_option("--gccontent", type="character", help="GC content per bin (optional)"),
-		make_option("--output", type="character", help="output file name")
+		make_option("--output-pdf", type="character", help="file name of PDF output"),
+		make_option("--output-ratio-bed", type="character", help="file name of coverage ratio output (BED format)")
 )
 opt <- parse_args(OptionParser(option_list=option_list))
 
@@ -15,10 +16,11 @@ if (is.na(opt$patient)) stop("patient ID not specified")
 if (is.na(opt$tumor)) stop("tumor coverage file not specified")
 if (is.na(opt$normal)) stop("normal coverage file not specified")
 if (is.na(opt$gccontent)) stop("GC content file not specified")
-if (is.na(opt$output)) stop("output file not specified")
+if (is.na(opt$`output-pdf`)) stop("output file not specified")
+if (is.na(opt$`output-ratio-bed`)) stop("output file not specified")
 
 # for test purposes
-#opt <- data.frame(patient="11291", tumor="/mnt/projects/zohre/results/cna/11291T.genome-coverage.tsv", normal="/mnt/projects/zohre/results/cna/11291K.genome-coverage.tsv", gccontent="/mnt/projects/zohre/results/cna/gcPerBin.tsv", output="/mnt/projects/zohre/results/cna/11291.genome-coverage.pdf", stringsAsFactors=F)
+#opt <- data.frame(patient="11291", tumor="/mnt/projects/zohre/results/cna/11291T.genome-coverage.tsv", normal="/mnt/projects/zohre/results/cna/11291K.genome-coverage.tsv", gccontent="/mnt/projects/zohre/results/cna/gcPerBin.tsv", "output-pdf"="/mnt/projects/zohre/results/cna/11291.genome-coverage.pdf", "output-ratio-bed"="/mnt/projects/zohre/results/cna/11291.genome-coverage.ratios.bed", stringsAsFactors=F, check.names=F)
 normal.chrs <- c("2")
 
 t <- read.delim(opt$tumor, header=F, colClasses=c("factor", "integer", "numeric"))
@@ -58,6 +60,10 @@ m$ratio <- m$ratio - fit.ratio$coeff["gc.cub"] * (m$gc.cub-mean(m$gc.cub))
 m$ratio[m$ratio > 1.5] <- 1.5
 m$ratio[m$ratio < -1.5] <- -1.5
 
+# write BED file with coverage ratios
+write.table(data.frame(chr=m$chr, start=m$bin, end=m$bin, name=NA, score=m$ratio), 
+            file=opt$`output-ratio-bed`, col.names = F, row.names = F, sep = "\t", quote = F, na="")
+
 # check again
 #m.chr <- m[m$chr == "6",] ; m.chr <- m.chr[order(m.chr$gc),]
 #plot(ratio~gc, data=m.chr, cex=0.3)
@@ -71,7 +77,7 @@ segs <- segment(CNA.smoothed, alpha = 0.01, verbose=0, min.width=2, undo.splits=
 
 smooth <- function(x,n=5){filter(x,rep(1/n,n), sides=2)}
 
-pdf(opt$output, width=30, paper="A4r")
+pdf(opt$`output-pdf`, width=30, paper="A4r")
 par(mfrow=c(5,5), mar=c(0.5,2,1.5,1), oma=c(0, 0, 2, 0))
 for (c in c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "X", "Y"))
 {

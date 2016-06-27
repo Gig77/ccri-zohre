@@ -249,7 +249,13 @@ snps/allsamples.vcf.gz:  $(foreach S, $(SAMPLES), gatk/$S.bwa.sorted.dupmarked.r
 	mv $@.part $@
 	tabix -p vcf $@
 	
-snps/allsamples.noMissing.vcf.gz: snps/allsamples.vcf.gz
+snps/allsamples.dbsnp.vcf.gz: snps/allsamples.vcf.gz $(DBSNP)
+	$(SNPSIFT) annotate -v -a $(DBSNP) $< 2>&1 1>$@.part | $(LOG)
+	bgzip $@.part
+	mv $@.part.gz $@
+
+	
+snps/allsamples.dbsnp.noMissing.vcf.gz: snps/allsamples.dbsnp.vcf.gz
 	$(VCFTOOLS) --gzvcf $< --remove-indv testT --remove-indv testK --max-missing 1 --recode --stdout | bgzip -c > $@.part
 	mv $@.part $@
 	tabix -p vcf $@
@@ -301,38 +307,25 @@ filtered-variants/%.tsv: snpeff/%.varscan.dbsnp.snpeff.vcf /mnt/projects/zohre/s
 #-----------	
 	
 .PHONY: cna
-cna: cna/allpatients.genome-coverage.pdf \
-     cna/allpatients.CDKN2AandB-4-88340353-90216312.region-coverage.pdf \
-     cna/allpatients.TRP53-11-69430664-69741568.region-coverage.pdf \
-     cna/allpatients.STAG2-X-41222539-43256502.region-coverage.pdf \
-     cna/allpatients.EZH2-6-46688433-48436871.region-coverage.pdf \
-     cna/allpatients.SETD2-9-110188449-110962781.region-coverage.pdf
+cna: cna/allsamples.genome-coverage.$(CNVBINSIZE).pdf \
+	 cna/allsamples.snp-profile.pdf \
+     cna/allsamples.CDKN2AandB-4-88340353-90216312.region-coverage.pdf \
+     cna/allsamples.CDKN2AandB-4-86340353-92216312.region-coverage.pdf \
+     cna/allsamples.TRP53-11-69430664-69741568.region-coverage.pdf \
+     cna/allsamples.STAG2-X-41222539-43256502.region-coverage.pdf \
+     cna/allsamples.EZH2-6-46688433-48436871.region-coverage.pdf \
+     cna/allsamples.SETD2-9-110188449-110962781.region-coverage.pdf \
+     $(foreach S, $(SAMPLES), cna/$S.all.baf.bed.gz)
      
 
-cna/allpatients.genome-coverage.pdf: $(foreach P, $(filter-out test, $(PAIRS)), cna/$P.genome-coverage.pdf)
+cna/allsamples.genome-coverage.$(CNVBINSIZE).pdf: $(foreach P, $(filter-out test, $(PAIRS)), cna/$P.genome-coverage.$(CNVBINSIZE).pdf)
 	gs -dBATCH -dNOPAUSE -q -sDEVICE=pdfwrite -sOutputFile=$@.part $^
 	mv $@.part $@
 	rm $^
 
-cna/%.snp-profile.pdf: cna/%T.genome-coverage.tsv \
-               		   cna/$$(subst Up,,$$(subst _2,,$$(subst _1,,%)))K.genome-coverage.tsv \
-               		   snpeff/%T.varscan.dbsnp.vcf \
-               		   snpeff/$$(subst Up,,$$(subst _2,,$$(subst _1,,%)))K.varscan.dbsnp.vcf \
-               		   /mnt/projects/generic/scripts/snp-profile.R
-	mkdir -p snp-profile
-	Rscript /mnt/projects/generic/scripts/snp-profile.R \
-		--sample-id $* \
-		--tumor-coverage $(word 1, $^) \
-		--normal-coverage $(word 2, $^) \
-		--tumor-vcf $(word 3, $^) \
-		--normal-vcf $(word 4, $^) \
-		--plot-output-file $@.part \
-		2>&1 | $(LOG)
-	mv $@.part $@
-
-cna/%.genome-coverage.pdf: cna/%T.genome-coverage.tsv \
-               		       cna/$$(subst Up,,$$(subst _2,,$$(subst _1,,%)))K.genome-coverage.tsv \
-						   cna/gcPerBin.tsv \
+cna/%.genome-coverage.$(CNVBINSIZE).pdf: cna/%T.genome-coverage.$(CNVBINSIZE).tsv \
+               		       cna/$$(subst Up,,$$(subst _2,,$$(subst _1,,%)))K.genome-coverage.$(CNVBINSIZE).tsv \
+						   cna/gcPerBin.$(CNVBINSIZE).tsv \
 						   $(PLOTSEGCOV)
 	mkdir -p cna
 	Rscript $(PLOTSEGCOV) \
@@ -340,12 +333,13 @@ cna/%.genome-coverage.pdf: cna/%T.genome-coverage.tsv \
 		--tumor $(word 1,$^) \
 		--normal $(word 2,$^) \
 		--gccontent $(word 3,$^) \
-		--output $@.part \
+		--output-pdf $@.part \
+		--output-ratio-bed cna/$*.genome-coverage.lrr.bed.part \
 		2>&1 | $(LOG)
-		
+	mv cna/$*.genome-coverage.lrr.bed.part cna/$*.genome-coverage.lrr.$(CNVBINSIZE).bed
 	mv $@.part $@
 
-cna/%.genome-coverage.tsv: gatk/%.bwa.sorted.dupmarked.realigned.bam $(SEGMENTCOV) $(CHRSIZES)
+cna/%.genome-coverage.$(CNVBINSIZE).tsv: gatk/%.bwa.sorted.dupmarked.realigned.bam $(SEGMENTCOV) $(CHRSIZES)
 	mkdir -p cna
 	$(SAMTOOLS) depth -Q 10 $< | \
 		perl $(SEGMENTCOV) \
@@ -354,9 +348,25 @@ cna/%.genome-coverage.tsv: gatk/%.bwa.sorted.dupmarked.realigned.bam $(SEGMENTCO
 			--chr-sizes $(CHRSIZES) \
 		2>&1 1>$@.part | $(LOG)
 	mv $@.part $@
-	
 
-cna/gcPerBin.tsv: $(REFGENOME) $(CHRSIZES)
+cna/allsamples.snp-profile.pdf: $(foreach P, $(filter-out test, $(PAIRS)), cna/$P.snp-profile.pdf)
+	gs -dBATCH -dNOPAUSE -q -sDEVICE=pdfwrite -sOutputFile=$@.part $^
+	mv $@.part $@
+	rm $^
+
+cna/%.snp-profile.pdf: cna/%T.hetnorm.baf.bed.gz \
+               		   /mnt/projects/zohre/scripts/snp-profile.R \
+               		   cna/%.genome-coverage.$(CNVBINSIZE).pdf
+	Rscript /mnt/projects/zohre/scripts/snp-profile.R \
+		--sample-id $* \
+		--lrr cna/$*.genome-coverage.lrr.$(CNVBINSIZE).bed \
+		--baf $(word 1, $^) \
+		--plot-output-file $@.part \
+		2>&1 | $(LOG)
+	mv $@.part $@
+
+cna/gcPerBin.$(CNVBINSIZE).tsv: $(REFGENOME) $(CHRSIZES)
+	mkdir -p cna
 	$(BEDTOOLS) nuc -fi $(REFGENOME) -bed <($(BEDTOOLS) makewindows -g $(CHRSIZES) -w $(CNVBINSIZE)) | cut -f 1-2,5 | grep -v "^#" > $@.part
 	mv $@.part $@
 
@@ -377,11 +387,29 @@ cna/sample-%.region-coverage.pdf: cna/$$(word 1, $$(subst ., , %))T.exon-coverag
 		2>&1 | $(LOG)
 	mv $@.part $@
 
-cna/allpatients.%.region-coverage.pdf: $(foreach P, $(filter-out test, $(PAIRS)), cna/sample-$P.%.region-coverage.pdf)
+cna/allsamples.%.region-coverage.pdf: $(foreach P, $(filter-out test, $(PAIRS)), cna/sample-$P.%.region-coverage.pdf)
 	gs -dBATCH -dNOPAUSE -q -sDEVICE=pdfwrite -sOutputFile=$@.part $^
 	mv $@.part $@
 	rm $^
 
+cna/%.all.baf.bed.gz: snps/allsamples.dbsnp.vcf.gz /mnt/projects/zohre/scripts/vcf2baf.pl
+	rm -f $@ $@.*
+	perl /mnt/projects/zohre/scripts/vcf2baf.pl --vcf-file $< --sample $* | bgzip -c > $@.part
+	tabix -p bed $@.part
+	mv $@.part.tbi $@.tbi
+	mv $@.part $@
+
+cna/%T.hetnorm.baf.bed.gz: snps/allsamples.dbsnp.vcf.gz /mnt/projects/zohre/scripts/vcf2baf.pl
+	rm -f $@ $@.*
+	perl /mnt/projects/zohre/scripts/vcf2baf.pl \
+		--vcf-file $< \
+		--sample $*T \
+		--not-homozygous-in-sample $(subst Up,,$(subst _2,,$(subst _1,,$*)))K \
+		| bgzip -c > $@.part
+	tabix -p bed $@.part
+	mv $@.part.tbi $@.tbi
+	mv $@.part $@
+	
 #cna/%.coverage.bedtools.txt: bwa/%.bwa.sorted.dupmarked.bam $(COVERBED)
 #	mkdir -p cna
 #	$(SAMTOOLS) view -bq 1 -F 3852 $< | \
