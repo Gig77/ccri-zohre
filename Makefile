@@ -352,7 +352,6 @@ cna/%.genome-coverage.$(CNVBINSIZE).tsv: gatk/%.bwa.sorted.dupmarked.realigned.b
 cna/allsamples.snp-profile.pdf: $(foreach P, $(filter-out test, $(PAIRS)), cna/$P.snp-profile.pdf)
 	gs -dBATCH -dNOPAUSE -q -sDEVICE=pdfwrite -sOutputFile=$@.part $^
 	mv $@.part $@
-	rm $^
 
 cna/%.snp-profile.pdf: cna/%T.hetnorm.baf.bed.gz \
                		   /mnt/projects/zohre/scripts/snp-profile.R \
