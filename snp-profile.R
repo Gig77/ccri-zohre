@@ -21,13 +21,13 @@ colnames(baf) <- c("chr", "start", "end", "name", "baf")
 # segment coverage
 cna.cov <-CNA(genomdat = lrr[,"ratio"], chrom = lrr[,"chr"], maploc = lrr[,"start"], data.type = 'logratio')
 cna.smooth <- smooth.CNA(cna.cov)
-seg.cov <- segment(cna.smooth, alpha = 0.001, verbose=0, min.width=2)
+seg.cov <- segment(cna.smooth, alpha = 0.001, verbose=0, min.width=5)
 
 # segment mirrored AF
 baf$maf <- abs(baf$baf - 0.5) + 0.5
 cna.maf <-CNA(genomdat = baf$maf, chrom = baf$chr, maploc = baf$start, data.type = 'logratio')
 cna.smooth <- smooth.CNA(cna.maf)
-seg.maf <- segment(cna.smooth, alpha = 0.001, verbose=0, min.width=2)
+seg.maf <- segment(cna.smooth, alpha = 0.001, verbose=0, min.width=5)
 
 # write loh segments
 #if (!is.null(opt$'loh-segments-output-file')) {
@@ -61,7 +61,7 @@ plot.maf <- function(data, segs, xlim, title=title) {
 		plot(0, 0, ylim=c(0,1), cex=0.3, xaxt='n', yaxt='n', main=title)
 		rect(par("usr")[1], par("usr")[3], par("usr")[2], par("usr")[4], col=rgb(0.97,0.97,0.97))
 	}
-	for(i in which(segs$seg.mean >= 0.6 & segs$seg.mean <= 0.9)) {
+	for(i in which(segs$seg.mean >= 0.62 & segs$seg.mean <= 0.9)) {
 		lines(c(segs$loc.start[i], segs$loc.end[i]),c(segs$seg.mean[i],segs$seg.mean[i]),type="l", col="orange", lty=1, lwd=2)
 		lines(c(segs$loc.start[i], segs$loc.end[i]),c(1-segs$seg.mean[i],1-segs$seg.mean[i]),type="l", col="orange", lty=1, lwd=2)
 	}
